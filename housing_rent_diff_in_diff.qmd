@@ -600,5 +600,5 @@ As shown in the Parallel trend Plot, both groups experienced a sharped increase 
 Overall, the lack of significance may be explained by the high volatility in housing markets during and after the COVID-19 period. Future research should extend this analysis as 2025 and 2026 data becomes available to see whether these emerging patterns persist over time.
 
 
-![](Images/dump_truck_pixel.jpg){fig-align="center" width=75 height=75 style="border-radius:20px;"}
+![](images/dump_truck_pixel.jpg){fig-align="center" width=75 height=75 style="border-radius:20px;"}
 
