@@ -169,7 +169,7 @@ For the Zillow data, the information was downloaded directly from the Zillow Res
 
 # Load Zillow data
 
-zillow_raw <- read.csv("/Users/yago/Baruch\ -\ CUNY/1.-\ MS\ Statistics/2nd\ semester/STA9794/HW/housing-rent-analysis/Data/Raw/zillow_metroarea.csv")
+zillow_raw <- read.csv("Data/Raw/zillow_metroarea.csv")
 
 zillow_yearly <- zillow_raw |>
                   pivot_longer(
