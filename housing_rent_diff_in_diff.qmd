@@ -1,0 +1,604 @@
+---
+title: "Impact of Housing Supply on Rent Growth: A Difference-in-Differences Analysis"
+author: "Yago Parada"
+format:
+  html:
+    theme: litera
+    toc: true
+    toc-title: "Project Navigation"
+    code-fold: true
+    code-summary: "Show the code"
+execute: 
+  warning: false
+  message: false
+---
+
+![](images/image_project.png){fig-align="center" width=750 height=450 style="border-radius:20px;"}
+
+## Abstract
+
+Housing affordability is a critical issue across several U.S. cities, where rent increases have consistently outpaced income growth over the last decade. This trend has become a recurring topic in national news, particularly in high-density metropolitan areas such as New York City. This project investigates the relationship between housing supply and rent growth, specifically whether metropolitan areas with a higher level of new housing construction experience lower rent inflation.
+
+To evaluate whether a significant increase in housing supply, measured through building permits, results in a observable reduction in annual median monthly rent growth, the following hypotheses are tested:
+
+- [**H0**]{style="color:#0039A6"}: Increasing housing construction does not affect rent growth in metropolitan areas.
+
+- [**Ha**]{style="color:#0039A6"}: Increasing housing construction reduces rent growth in metropolitan areas.
+
+
+## Data
+
+The data for this project was collected from three primary public sources:
+
+1. [**Zillow research**]{style="color:#0039A6"}: The Zillow Observed Rent Index (ZORI) provides monthly rent estimates at the metropolitan area level.
+2. [**United States Census Bureau**]{style="color:#0039A6"}: The Building Permits Survey provides the number of new housing units authorized.
+3. [**Bureau of Labor Statistics (BLS) & Census API**]{style="color:#0039A6"}: Used to retrieve population, median household income, and unemployment rates.
+
+### Preparation and transformation
+
+The analysis is conducted at the [**Metropolitan Statistical Area (MSA) level**]{style="color:#0039A6"} to ensure data consistency across sources, as the building permit data is natively reported at the CBSA/metropolitan level.
+
+First, building permit data was downloaded in separate annual files from the U.S. Census Bureau. These files were cleaned, standardized, and merged into a single dataset.
+
+```{r}
+
+library(readxl)
+library(dplyr)
+library(purrr)
+library(tidyverse)
+library(DT)
+library(broom)
+
+path_permits_xls <- file.path("Data", "Raw", "Permits")
+path_permits_xlsx <- file.path("Data", "Raw", "Permits")
+path_permits_csv <- file.path("Data", "Raw", "Permits", "permits_2021.csv")
+
+files <- list.files(path = path_permits_xls,
+                    pattern = "*.xls",
+                    full.names = TRUE)
+
+permits_xls_file <- map_df(files, function(f) {
+                            data <- read_excel(f) # Skip headers if the Census file has them
+                            data$source_file <- f # Keep track of which year/file it came from
+                            return(data)
+})
+
+permits_xls_clean <- permits_xls_file |>
+                      select("CSA",
+                             "CBSA",
+                             "Name",
+                             "Total",
+                             "Year")
+
+permits_csv_data <- read.csv(path_permits_csv)
+
+permits_csv_clean <- permits_csv_data |> 
+                      select("CSA",
+                             "CBSA",
+                             "Name",
+                             "Total",
+                             "Year")
+
+permits_csv_xls <- bind_rows(permits_xls_clean, permits_csv_clean)
+
+# Sanity check
+# table(permits_csv_xls$Year)
+
+
+xlsx_files <- list.files(path = path_permits_xlsx,
+                    pattern = "*.xlsx",
+                    full.names = TRUE)
+
+permits_xlsx_file <- map_df(xlsx_files, function(f2) {
+                            data <- read_excel(f2) 
+                            data$source_file <- f2           
+                            return(data)
+})
+
+permits_xlsx_clean <- permits_xlsx_file |>
+                      select("CSA",
+                             "CBSA",
+                             "Name",
+                             "Total",
+                             "Year")
+
+total_permits <- bind_rows(permits_csv_xls, permits_xlsx_clean) |>
+                  mutate(CBSA = as.character(CBSA)) 
+
+hightlight <- function(x, color = "#0039A6") {
+  sprintf('<span style="color:%s; font-weight:bold;">%s</span>', color, x)
+}
+
+```
+
+Next, a connection was established to the Census Bureau API to pull demographic and economic controls. The data was filtered to include only Metropolitan areas before merging with the building permit dataset. 
+
+```{r}
+
+# Census API
+
+library(tidycensus)
+
+variables_census <- c(
+                      population = "B01003_001",
+                      median_income = "B19013_001",
+                      unemployment_rate = "DP03_0009P"
+)
+
+years <- c(2015, 2016, 2017, 2018, 2019, 2021, 2022, 2023, 2024)
+
+census_raw <- map_df(years, function(y) {
+                            get_acs(
+                              geography = "metropolitan statistical area/micropolitan statistical area",
+                              variables = variables_census,
+                              year = y,
+                              survey = "acs1",
+                              output = "wide") |>
+                            mutate(Year = y)
+})
+
+census_clean <- census_raw |>
+  filter(str_detect(NAME, "Metro Area")) |>
+  select(CBSA = GEOID,
+         Name = NAME,
+         Year,
+         Population = populationE,
+         med_income = median_incomeE,
+         unempl_rate = unemployment_rateE)
+
+# Sanity check census_clean
+# unique(str_detect(census_clean$Name, "Micro Area")) # Result must be FALSE
+
+# Merge permits with Census API
+
+master_df <- total_permits |>
+                inner_join(census_clean, by = c("CBSA", "Year")) |>
+                select(CBSA,
+                       Name = Name.x,
+                       Year,
+                       Permits = Total, 
+                       Population,
+                       med_income,
+                       unempl_rate)
+
+```              
+
+For the Zillow data, the information was downloaded directly from the Zillow Research website. Although the data is reported at the metropolitan level, some transformations were required for the merge. Zillow does not use CBSA codes, it uses metropolitan areas names that are often shorter than the official Census names. For example, where census uses "New York - Newark - Jersey City, NY-NJ-PA", Zillow simply records "New York, NY". These names were standardized to create a consistent merge_key.
+
+```{r}
+
+# Load Zillow data
+
+zillow_raw <- read.csv("/Users/yago/Baruch\ -\ CUNY/1.-\ MS\ Statistics/2nd\ semester/STA9794/HW/housing-rent-analysis/Data/Raw/zillow_metroarea.csv")
+
+zillow_yearly <- zillow_raw |>
+                  pivot_longer(
+                    cols = starts_with("X"),
+                    names_to = "date_raw",
+                    values_to = "Rent_Dolares"
+                  ) |>
+                  mutate(Year = as.numeric(str_extract(date_raw, "\\d{4}"))) |>
+                  group_by(RegionName, StateName, Year) |>
+                  summarize(avg_rent_usd = mean(Rent_Dolares, na.rm = TRUE), .groups = "drop")
+
+# Clean names to match Zillow's short fotmat 
+
+master_df <- master_df |>
+              mutate(metro_simple = str_extract(Name, "^[^-,]+"), 
+                     state_simple = str_extract(Name, "(?<=, )[A-Z]{2}"),
+                     merge_key = paste0(metro_simple, ", ", state_simple))
+
+master_df_clean <- master_df |>
+                    group_by(CBSA, Year) |>
+                    slice_max(order_by = Population, n = 1, with_ties = FALSE) |>
+                    ungroup()
+
+
+# Final merge with Zillow
+
+master_v1 <- master_df_clean |>
+                  left_join(zillow_yearly, by = c("merge_key" = "RegionName", "Year"))
+
+
+# Sanity check (9 rows)
+# ny_count <- master_v1 |> filter(str_detect(Name, "New York")) 
+
+```
+
+Finally, all datasets were merged into a master dataset. To prepare for the analysis, two primary metrics were calculated:
+
+- [**Annual Rent Growth**]{style="color:#0039A6"}: The year-over-year percentage change in average rent.
+- [**Permit intensity**]{style="color:#0039A6"}: The number of new units authorized per 1,000 residents, which allows for a fair comparison between cities of different sizes.
+
+```{r}
+
+# Calculating metrics 
+
+master_v2 <- master_v1 |>
+                  group_by(CBSA) |>
+                  arrange(CBSA, Year) |>
+                  mutate(rent_growth = (avg_rent_usd / lag(avg_rent_usd)) -1,
+                         permit_intensity = (Permits / Population) * 1000) |>
+                  ungroup() |>
+                  filter(!is.na(rent_growth))
+
+
+master_v3 <- master_v2 |>
+                  mutate(rent_growth = round(rent_growth, 4),
+                         permit_instensity = round(permit_intensity, 4)) |>
+                  select(CBSA,
+                         Name,
+                         Year,
+                         Permits,
+                         Population,
+                         avg_rent_usd,
+                         rent_growth,
+                         med_income,
+                         unempl_rate,
+                         permit_intensity) 
+
+# Sanity checks (Expected 0 duplicates and 0 NAs)
+# master_v3 |> count(CBSA, Year) |> filter(n > 1) 
+#master_v3 |> filter(is.na(avg_rent_usd)) 
+
+```
+
+## Experiment Design
+
+### Methodology
+
+Metropolitan areas are classified into treatment and control groups based on [**pre-pandemic construction intensity**]{style="color:#0039A6"}. One group represents the metropolitan areas with high levels of building permits (Treatment Group), and the other group represents those with lower construction levels (Control Group).
+
+For the Difference-in-Differences (DiD) approach to be valid, similar metropolitan areas must be compared. While their construction levels differ, comparability in other economic areas is required. To ensure this similarity, variables such as population, unemployment rate, and median income are utilized as secondary sources of variation.
+
+The study is divided into [**two periods**]{style="color:#0039A6"}:
+
+- [**Pre-treatment**]{style="color:#0039A6"}: Covers 2015–2019, where both groups should ideally follow parallel trends.
+- [**Post-treatment**]{style="color:#0039A6"}: Covers 2021–2024.
+
+The year 2020 was excluded to avoid the immediate, extreme volatility of the COVID-19. However, the year 2020 serves as our reference point, allowing us to see how these groups diverged afterward.
+
+### Variables
+
+1. [**Target Metric**]{style="color:#0039A6"}: Annual median monthly rent growth.
+2. [**Primary independent variable**]{style="color:#0039A6"}: Number of new housing units authorized through building permits (Permit intensity).
+3. [**Control variables**]{style="color:#0039A6"}: Population, unemployment rates, and median household income
+
+### Ensuring Group Comparability
+
+To ensure that the treated and control groups are comparable, a specific filtering process was followed:
+
+First, the data was filtered to include only the [**top 150 largest metropolitan areas**]{style="color:#0039A6"}. This prevents the inclusion of rural areas where housing market dynamics are completely different.
+
+From those 150, a [**Standard Deviation filter on the log of the population**]{style="color:#0039A6"} was applied. This removes extreme outliers, both the "mega-cities" like New York or LA, and the smaller cities at the bottom of the list, leaving a group of metropolitan areas that are more similar in size.
+
+Finally, to create a clear contrast in construction levels, these metropolitan areas were [**divided into quintiles**]{style="color:#0039A6"} based on their pre-pandemic permit intensity. The middle quintile (the 3rd tier) was removed, and the top two tiers were assigned to the Treatment group while the bottom two to the Control group.
+
+```{r}
+
+
+# Top 150 metropolitan areas.
+
+major_markets <- master_v3 |>
+                  group_by(CBSA) |>
+                  summarise(avg_pop = mean(Population, na.rm = TRUE), .groups = "drop") |>
+                  slice_max(order_by = avg_pop, n = 150) |>
+                  mutate(log_pop = log(avg_pop + 1))
+
+# Apply the Standard Deviation filter.
+
+mean_log <- mean(major_markets$log_pop, na.rm = TRUE)
+sd_log   <- sd(major_markets$log_pop, na.rm = TRUE)
+
+similar_metro_list <- major_markets |>
+                        filter(log_pop >= (mean_log - 1 * sd_log) & 
+                        log_pop <= (mean_log + 1 * sd_log)) |>
+                        pull(CBSA)
+
+final_check <- major_markets |> filter(CBSA %in% similar_metro_list)
+# summary(final_check$avg_pop)
+
+# Treatment assignment based on Pre-Pandemic Intensity.
+
+treatment_assignment <- master_v3 |>
+                          filter(CBSA %in% similar_metro_list) |>
+                          filter(Year < 2020) |>
+                          group_by(CBSA) |>
+                          summarize(pre_pandemic_intensity = mean(permit_intensity, na.rm = TRUE)) |>
+                          mutate(tier = ntile(pre_pandemic_intensity, 5)) |>
+                          filter(tier != 3) |>
+                          mutate(treated = ifelse(tier %in% c(4, 5), 1, 0)) |>
+                          select(CBSA, treated, pre_pandemic_intensity)
+
+```
+
+To verify that these groups are actually similar, the following [**balance table**]{style="color:#0039A6"} can be observed:
+
+```{r}
+
+# Balance table
+
+balance_table <-master_v3 |>
+                  filter(CBSA %in% treatment_assignment$CBSA,
+                         Year < 2020) |>
+                  left_join(treatment_assignment, by = "CBSA") |>
+                  group_by(treated) |>
+                  summarize(
+                    avg_income = mean(med_income, na.rm = TRUE),
+                    sd_income = sd(med_income, na.rm = TRUE),
+                    avg_unemp = mean(unempl_rate, na.rm = TRUE),
+                    sd_unemp = sd(unempl_rate, na.rm = TRUE),
+                    avg_pop = mean(Population, na.rm = TRUE),
+                    sd_pop = sd(Population, na.rm = TRUE),
+                  .groups = "drop"
+                  )
+
+balance_table |> datatable(caption = htmltools::tags$caption(
+                            style = 'caption-side: top;
+                                      text-align: center;
+                                      font-size:18px;
+                                      font-weight:bold; color:black;',
+                                      'Balance Table (1 = Treatment, 0 = Control)'),
+                           colnames = c("Group" = "treated",
+                                        "Avg. Income" = "avg_income",
+                                        "SD Income" = "sd_income",
+                                        "Avg. Unemp. Rate" = "avg_unemp",
+                                        "SD Unemp. Rate" = "sd_unemp",
+                                        "Avg. Population" = "avg_pop",
+                                        "SD Population" = "sd_pop"),
+                           options = list(searching = FALSE, 
+                                          paging = FALSE,
+                                          info = FALSE,
+                                          pageLength  = 5,
+                                          columnDefs = list(list(className = 'dt-center', targets = '_all'))
+                                          ),
+                           escape = FALSE,
+                           rownames = FALSE) |> 
+                        formatRound(columns = c("Avg. Income", "SD Income", "Avg. Population", "SD Population"),                                        digits = 0) |>
+                        formatRound(columns = c("Avg. Unemp. Rate", "SD Unemp. Rate"), digits = 2)
+                          
+
+``` 
+<br>
+The balance table shows [**high similarity between both groups**]{style="color:#0039A6"}. 
+
+### Distribution assumptions
+
+The target metric (Annual median monthly rent growth) is a continuous variable. The analysis assumes that rent growth follows an approximately normal distribution when comparing several metropolitan areas over the multiple years. 
+
+Although excluding 2020 helps reduce part of the volatility introduced by the COVID, some effects of pandemic-era may still impact the distribution of the data. To evaluate this assumption, a the Shapiro-Wilk Normality test and a Normal Q-Q plot will be analyzed in the next section.
+
+## Experiment Results
+
+Before performing the Difference-in-Differences analysis, some test will be performed to evaluate the assumptions for the analysis and check for baseline differences between both groups using a two-sample t-test on the pre-treatment data.
+
+### Cheking the assumptions
+
+It is assumed that the residuals of the target metric follow an approximately normal distribution. To validate this, a [**Shapiro-Wilk test**]{style="color:#0039A6"} was performed and a [**Q-Q plot of the residuals**]{style="color:#0039A6"} from our fixed effects model was inspected.
+
+```{r}
+
+# Assumptions check
+
+# Prepare data for DiD
+
+master_analysis <- master_v3 |>
+                    filter(CBSA %in% treatment_assignment$CBSA) |>
+                    inner_join (treatment_assignment, by = "CBSA") |>
+                    filter(Year != 2020) |>
+                    mutate(post = ifelse(Year >= 2021, 1, 0))
+
+# Fixed Effects Model with Controls
+
+library(fixest)
+
+did_fix_controls <- feols(rent_growth ~ treated * post +
+                            log(Population) +
+                            unempl_rate | CBSA + Year,
+                          data = master_analysis)
+
+# Shapiro-Wilk Test
+
+res <- did_fix_controls$residuals
+res_shapiro <- shapiro.test(res)
+
+shapiro_results <- data.frame(
+  Test = "Shapiro-Wilk Normality Test",
+  Statistic = res_shapiro$statistic,
+  `P Value` = res_shapiro$p.value
+)
+
+
+shapiro_results |> 
+  datatable(
+    options = list(
+      searching = FALSE, paging = FALSE, info = FALSE,
+      columnDefs = list(list(className = 'dt-center', targets = '_all'))
+    ),
+    colnames = c("Test Name", "W Statistic", "P-Value"),
+    escape = FALSE, rownames = FALSE
+  ) |> 
+  formatRound(columns = c('Statistic', 'P.Value'), digits = 8)
+
+
+```
+<br>
+```{r}
+# Q-Q plot
+
+res_data <- data.frame(res = res)
+
+ggplot(res_data, aes(sample = res)) +
+  stat_qq(shape = 21, 
+          alpha = 0.5, 
+          size = 3, 
+          fill = "#0039A6", 
+          color = "black") +
+  stat_qq_line(color = "#da1e28", 
+               linewidth = 1) +
+  labs(title = "Normal Q-Q Plot of Residuals",
+       x = "Theoretical Quantiles",
+       y = "Sample Quantiles") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),
+        axis.title.x = element_text(face = "bold", size = 12, margin = margin(t = 10)),
+        axis.title.y = element_text(face = "bold", size = 12, margin = margin(r = 10)),
+        axis.text = element_text(size = 10))
+
+```
+
+The Shapiro-Wilk test shows a [**p-value < 0.001**]{style="color:#0039A6"}, meaning that the [**null hypothesis of normality is rejected**]{style="color:#0039A6"}. However, the Q-Q plot shows that while the middle area of the distribution follows the reference line well, there are heavy tails on both ends. These outliers are likely due to the unusual rent fluctuations observed during and after the COVID-19. Given the sample size of the study (N = 452), the [**Central Limit Theorem**]{style="color:#0039A6"} provides the basis to support the reliability of the estimates despite these deviations from normality.
+
+### Two-sample T-test
+
+To evaluate if the treated and control groups started from the same baseline, a [**Two Sample t-test**]{style="color:#0039A6"} on rent growth during the pre-treatment period (2016–2019) was conducted.
+
+```{r}
+
+# t-test
+
+t_test_results <- t.test(rent_growth ~ treated,
+       data = subset(master_analysis, Year < 2020))
+
+t_table_data <- data.frame(
+  Comparison = "Treatment vs. Control (Pre-Pandemic)",
+  `Mean Control` = t_test_results$estimate[1],
+  `Mean Treatment` = t_test_results$estimate[2],
+  `T Statistic` = t_test_results$statistic,
+  `P Value` = t_test_results$p.value,
+  `Lower CI` = t_test_results$conf.int[1],
+  `Upper CI` = t_test_results$conf.int[2]
+)
+
+t_table_data |> 
+  datatable(
+    options = list(
+      searching = FALSE, paging = FALSE, info = FALSE,
+      columnDefs = list(list(className = 'dt-center', targets = '_all'))
+    ),
+    escape = FALSE, rownames = FALSE
+  ) |> 
+  formatRound(columns = c('Mean.Control', 'Mean.Treatment', 'T.Statistic', 'P.Value', 'Lower.CI', 'Upper.CI'), digits = 4)
+
+```
+<br>
+The results show a [**statistically significant difference**]{style="color:#0039A6"} between both groups, [**p-value = 0.0014**]{style="color:#0039A6"}. The [**treated group**]{style="color:#0039A6"} had slightly higher average rent growth of [**4.66%**]{style="color:#0039A6"}, compared to the [**control group 4.01%**]{style="color:#0039A6"}. 
+
+This suggests the presence of pre-existing differences in rent dynamics between the two groups. To account for this differences, [**a Difference-in-Differences specification with fixed effects**]{style="color:#0039A6"} is necessary to control for metropolitan characteristics that remain constant over time. 
+
+### Parallel trends Plot
+
+Before the Difference-in-Differences analysis, the average rent growth for both groups was visualized over time. It can be seen whether the groups were moving together before the pandemic and how they reacted.
+
+```{r}
+
+# Parallel trends Plot
+
+library(ggplot2)
+library(scales)
+
+plot_data <- master_analysis |>
+  group_by(Year, treated) |>
+  summarize(mean_growth = mean(rent_growth, na.rm = TRUE))
+
+ggplot(plot_data, aes(x = Year, y = mean_growth, color = as.factor(treated))) +
+  geom_line(linewidth = 1) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  geom_point() +
+  scale_color_manual(name = "Group",
+                     values = c("0" = "red", "1" = "#0039A6"),
+                    labels = c("Control", "Treatment")) +
+  labs(title = "Rent Growth Trends: Treatment vs. Control",
+       subtitle = "Why the DiD might be non-significant?",
+       y = "Mean Rent Growth",
+       color = "Group") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.title = element_text(face = "bold", size = 12))
+
+```
+
+The plot illustrates why the results might be non-significant. Both the treatment and control groups [**spiked in unison between 2020 and 2022**]{style="color:#0039A6"}, suggesting that the impact of COVID-19 affected both areas simultaneously. However, [**a change in tendency**]{style="color:#0039A6"} is observable in 2023 and 2024, where the groups finally began to diverge, with the high-construction metropolitan areas showing lower rent growth.
+
+### Difference-in-Differences analysis
+
+To confirm these visual observations, the formal Difference-in-Differences analysis was performed.
+
+```{r}
+
+
+# Basic DiD without controls
+
+did_model <- lm(rent_growth ~ treated * post, 
+                data = master_analysis)
+
+
+# DiD controlling for confounders
+
+
+did_model_controls <- lm(rent_growth ~ treated * post + 
+                           med_income + 
+                           unempl_rate + 
+                           Population,
+                         data = master_analysis
+                         )
+
+# Final fixed effects model
+
+library(modelsummary)
+
+models <- list(
+  "Basic DiD"     = did_model,
+  "With Controls" = did_model_controls,
+  "Fixed Effects" = did_fix_controls
+)
+
+# Comparison table and Adjusted R^2 result
+
+adr2_result <- list(
+  adj_r2 = round(fixest::r2(did_fix_controls, type = "ar2"), 3)
+)
+
+m1 <- tidy(did_model) |> filter(term == "treated:post") |> mutate(Model = "Basic DiD")
+m2 <- tidy(did_model_controls) |> filter(term == "treated:post") |> mutate(Model = "With Controls")
+m3 <- tidy(did_fix_controls) |> filter(term == "treated:post") |> mutate(Model = "Fixed Effects")
+
+did_summary <- bind_rows(m1, m2, m3) |>
+  select(Model, estimate, std.error, p.value)
+
+did_summary |> 
+  datatable(
+    caption = htmltools::tags$caption(
+      style = 'caption-side: top; text-align: center; font-size:18px; font-weight:bold; color:black;',
+      'Summary of Treatment Effect (Treated:Post) Across Specifications'
+    ),
+    colnames = c("Model Specification", "Estimate", "Std. Error", "P-Value"),
+    options = list(
+      searching = FALSE, 
+      paging = FALSE, 
+      info = FALSE,
+      columnDefs = list(list(className = 'dt-center', targets = '_all'))
+    ),
+    rownames = FALSE
+  ) |> 
+  formatRound(columns = c('estimate', 'std.error', 'p.value'), digits = 4)
+
+```
+<br>
+
+From the fixed effects model, the DiD interaction term, treated:post, yielded an estimate of -0.0027 with a [**p-value of 0.517**]{style="color:#0039A6"}, indicating [**no statistically significant treatment effect**]{style="color:#0039A6"} during the study period. Therefore, the analysis does not provide strong evidence that higher housing construction reduced rent growth across metropolitan areas. 
+
+Despite the null result for the primary hypothesis, the fixed effects model, with [**an Adjusted R-squared**]{style="color:#0039A6"} of `r hightlight(adr2_result$adj_r2)`, captures a substantial portion of the variation in rent growth after accounting for metropolitan and year-specific factors, and variables like unemployment rate and median income are significantly associated with rent growth during the study period.
+
+## Summary and Discussion
+
+The analysis does not provide statistically significant evidence that metropolitan areas with high levels of housing construction experienced lower units rent growth during the 2021-2024 period. 
+
+As shown in the Parallel trend Plot, both groups experienced a sharped increase in rent growth between 2020 and 2022, likely reflecting the pandemic shocks affecting all metropolitan areas. However, a divergence appears in 2023–2024, where high-supply cities exhibit lower growth than the control group.
+
+Overall, the lack of significance may be explained by the high volatility in housing markets during and after the COVID-19 period. Future research should extend this analysis as 2025 and 2026 data becomes available to see whether these emerging patterns persist over time.
+
+
+![](Images/dump_truck_pixel.jpg){fig-align="center" width=75 height=75 style="border-radius:20px;"}
+
